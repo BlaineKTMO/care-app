@@ -98,27 +98,278 @@ const theme = createTheme({
   },
 });
 
+// Add Fitbit configuration
+const FITBIT_CONFIG = {
+  clientId: '23Q53D',
+  clientSecret: '069419eb237705422f993a04c5bdccb2',
+  redirectUri: 'http://localhost:3000/callback',
+  authorizationUri: 'https://www.fitbit.com/oauth2/authorize',
+  tokenUri: 'https://api.fitbit.com/oauth2/token',
+  scope: 'heartrate profile activity',
+  apiEndpoint: 'https://api.fitbit.com/1/user/-/activities/heart/date/today/1d/1min.json'
+};
+
+// Add authentication helper
+function FitbitAuth() {
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [accessToken, setAccessToken] = useState(null);
+  const [refreshToken, setRefreshToken] = useState(null);
+  const [error, setError] = useState(null);
+
+  const login = () => {
+    // Create state parameter for security
+    const state = Math.random().toString(36).substring(7);
+    sessionStorage.setItem('fitbitState', state);
+
+    const authUrl = `${FITBIT_CONFIG.authorizationUri}?` +
+      `response_type=code` +
+      `&client_id=${FITBIT_CONFIG.clientId}` +
+      `&redirect_uri=${encodeURIComponent(FITBIT_CONFIG.redirectUri)}` +
+      `&scope=${encodeURIComponent(FITBIT_CONFIG.scope)}` +
+      `&state=${state}`;
+    
+    window.location.href = authUrl;
+  };
+
+  const getAccessToken = async (code) => {
+    try {
+      const tokenResponse = await fetch(FITBIT_CONFIG.tokenUri, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Authorization': 'Basic ' + btoa(`${FITBIT_CONFIG.clientId}:${FITBIT_CONFIG.clientSecret}`)
+        },
+        body: new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: code,
+          redirect_uri: FITBIT_CONFIG.redirectUri,
+        })
+      });
+
+      if (!tokenResponse.ok) {
+        const errorData = await tokenResponse.json();
+        throw new Error(errorData.errors?.[0]?.message || 'Failed to get access token');
+      }
+
+      const tokenData = await tokenResponse.json();
+      setAccessToken(tokenData.access_token);
+      setRefreshToken(tokenData.refresh_token);
+      setIsAuthenticated(true);
+      
+      // Store tokens securely
+      sessionStorage.setItem('fitbitAccessToken', tokenData.access_token);
+      sessionStorage.setItem('fitbitRefreshToken', tokenData.refresh_token);
+      sessionStorage.setItem('fitbitTokenExpiry', Date.now() + (tokenData.expires_in * 1000));
+    } catch (error) {
+      console.error('Error getting access token:', error);
+      setError(error.message);
+    }
+  };
+
+  const refreshAccessToken = async () => {
+    try {
+      const tokenResponse = await fetch(FITBIT_CONFIG.tokenUri, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Authorization': 'Basic ' + btoa(`${FITBIT_CONFIG.clientId}:${FITBIT_CONFIG.clientSecret}`)
+        },
+        body: new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: refreshToken
+        })
+      });
+
+      if (!tokenResponse.ok) {
+        const errorData = await tokenResponse.json();
+        throw new Error(errorData.errors?.[0]?.message || 'Failed to refresh token');
+      }
+
+      const tokenData = await tokenResponse.json();
+      setAccessToken(tokenData.access_token);
+      setRefreshToken(tokenData.refresh_token);
+      
+      // Update stored tokens
+      sessionStorage.setItem('fitbitAccessToken', tokenData.access_token);
+      sessionStorage.setItem('fitbitRefreshToken', tokenData.refresh_token);
+      sessionStorage.setItem('fitbitTokenExpiry', Date.now() + (tokenData.expires_in * 1000));
+
+      return tokenData.access_token;
+    } catch (error) {
+      console.error('Error refreshing token:', error);
+      setIsAuthenticated(false);
+      // Clear stored tokens on refresh failure
+      sessionStorage.removeItem('fitbitAccessToken');
+      sessionStorage.removeItem('fitbitRefreshToken');
+      sessionStorage.removeItem('fitbitTokenExpiry');
+      throw error;
+    }
+  };
+
+  useEffect(() => {
+    // Check for authorization code in URL
+    const urlParams = new URLSearchParams(window.location.search);
+    const code = urlParams.get('code');
+    const state = urlParams.get('state');
+    const storedState = sessionStorage.getItem('fitbitState');
+    
+    if (code) {
+      // Verify state parameter
+      if (state !== storedState) {
+        console.error('State mismatch - possible CSRF attack');
+        return;
+      }
+      
+      getAccessToken(code);
+      // Clean up URL and state
+      window.history.replaceState({}, document.title, window.location.pathname);
+      sessionStorage.removeItem('fitbitState');
+    } else {
+      // Check for existing tokens
+      const storedAccessToken = sessionStorage.getItem('fitbitAccessToken');
+      const storedRefreshToken = sessionStorage.getItem('fitbitRefreshToken');
+      const tokenExpiry = sessionStorage.getItem('fitbitTokenExpiry');
+
+      if (storedAccessToken && storedRefreshToken) {
+        setAccessToken(storedAccessToken);
+        setRefreshToken(storedRefreshToken);
+        setIsAuthenticated(true);
+
+        // Check if token needs refresh
+        if (tokenExpiry && Date.now() > parseInt(tokenExpiry) - 300000) { // Refresh 5 minutes before expiry
+          refreshAccessToken().catch(() => {
+            // Handle refresh failure - user will need to re-authenticate
+            login();
+          });
+        }
+      }
+    }
+  }, []);
+
+  return { 
+    isAuthenticated, 
+    accessToken, 
+    login,
+    refreshAccessToken 
+  };
+}
+
 function HeartRateMonitor({ patientId }) {
   const [heartRate, setHeartRate] = useState(null);
   const [isMonitoring, setIsMonitoring] = useState(false);
+  const [error, setError] = useState(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [lastUpdateTime, setLastUpdateTime] = useState(null);
+  const [sensor, setSensor] = useState(null);
 
   useEffect(() => {
-    let interval;
-    if (isMonitoring) {
-      // Simulate heart rate monitoring with random variations
-      const baseRate = 70 + Math.random() * 20;
-      setHeartRate(Math.round(baseRate));
-      
-      interval = setInterval(() => {
-        const variation = Math.random() * 6 - 3; // Random variation of ±3 BPM
-        setHeartRate(prev => Math.round(prev + variation));
-      }, 2000);
+    // Check if the Web Bluetooth API is available
+    if (!navigator.bluetooth) {
+      setError("Bluetooth is not available on this device or browser");
+      return;
+    }
+
+    const setupHeartRateSensor = async () => {
+      try {
+        const device = await navigator.bluetooth.requestDevice({
+          filters: [{ services: ['heart_rate'] }],
+          optionalServices: ['heart_rate']
+        });
+
+        const server = await device.gatt.connect();
+        const service = await server.getPrimaryService('heart_rate');
+        const characteristic = await service.getCharacteristic('heart_rate_measurement');
+        
+        setSensor({ device, characteristic });
+        setError(null);
+      } catch (err) {
+        console.error('Error setting up heart rate sensor:', err);
+        setError(err.message || 'Failed to set up heart rate sensor');
+        setIsMonitoring(false);
+      }
+    };
+
+    if (isMonitoring && !sensor) {
+      setupHeartRateSensor();
+    }
+  }, [isMonitoring, sensor]);
+
+  useEffect(() => {
+    let notificationHandler;
+
+    const startMonitoring = async () => {
+      if (!sensor) return;
+
+      try {
+        setIsLoading(true);
+        
+        // Setup notification handler
+        notificationHandler = (event) => {
+          const value = event.target.value;
+          const heartRate = value.getUint8(1);
+          setHeartRate(heartRate);
+          setLastUpdateTime(Date.now());
+          setError(null);
+        };
+
+        await sensor.characteristic.startNotifications();
+        sensor.characteristic.addEventListener('characteristicvaluechanged', notificationHandler);
+        
+        setIsLoading(false);
+      } catch (err) {
+        console.error('Error starting heart rate monitoring:', err);
+        setError(err.message || 'Failed to start heart rate monitoring');
+        setIsMonitoring(false);
+        setIsLoading(false);
+      }
+    };
+
+    const stopMonitoring = async () => {
+      if (!sensor) return;
+
+      try {
+        await sensor.characteristic.stopNotifications();
+        if (notificationHandler) {
+          sensor.characteristic.removeEventListener('characteristicvaluechanged', notificationHandler);
+        }
+        await sensor.device.gatt.disconnect();
+        setSensor(null);
+        setHeartRate(null);
+        setLastUpdateTime(null);
+      } catch (err) {
+        console.error('Error stopping heart rate monitoring:', err);
+      }
+    };
+
+    if (isMonitoring && sensor) {
+      startMonitoring();
+    } else if (!isMonitoring && sensor) {
+      stopMonitoring();
     }
 
     return () => {
-      if (interval) clearInterval(interval);
+      if (sensor && notificationHandler) {
+        stopMonitoring();
+      }
     };
-  }, [isMonitoring]);
+  }, [isMonitoring, sensor]);
+
+  // Add last update time display
+  const getLastUpdateText = () => {
+    if (!lastUpdateTime) return '';
+    const seconds = Math.floor((Date.now() - lastUpdateTime) / 1000);
+    return `Last updated ${seconds} seconds ago`;
+  };
+
+  if (!navigator.bluetooth) {
+    return (
+      <Box sx={{ display: 'flex', alignItems: 'center', mt: 2 }}>
+        <Typography variant="body2" color="error">
+          Heart rate monitoring not available (Bluetooth not supported)
+        </Typography>
+      </Box>
+    );
+  }
 
   return (
     <Box sx={{ display: 'flex', alignItems: 'center', mt: 2 }}>
@@ -136,15 +387,31 @@ function HeartRateMonitor({ patientId }) {
       />
       <Box sx={{ flexGrow: 1 }}>
         <Typography variant="body2" color="textSecondary">
-          Heart Rate Monitor
+          Heart Rate Monitor (Bluetooth)
         </Typography>
-        {isMonitoring ? (
-          <Typography variant="h6" color="error">
-            {heartRate} BPM
+        {error ? (
+          <Typography variant="body2" color="error">
+            Error: {error}
           </Typography>
+        ) : isLoading ? (
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            <CircularProgress size={20} />
+            <Typography variant="body2">Loading...</Typography>
+          </Box>
+        ) : isMonitoring ? (
+          <>
+            <Typography variant="h6" color="error">
+              {heartRate ? `${heartRate} BPM` : 'Waiting for data...'}
+            </Typography>
+            {lastUpdateTime && (
+              <Typography variant="caption" color="textSecondary">
+                {getLastUpdateText()}
+              </Typography>
+            )}
+          </>
         ) : (
           <Typography variant="body2" color="textSecondary">
-            Monitor is off
+            Click Start to connect to a heart rate monitor
           </Typography>
         )}
       </Box>
@@ -153,6 +420,7 @@ function HeartRateMonitor({ patientId }) {
         variant={isMonitoring ? "contained" : "outlined"} 
         color={isMonitoring ? "error" : "primary"}
         onClick={() => setIsMonitoring(!isMonitoring)}
+        disabled={!!error || isLoading}
       >
         {isMonitoring ? 'Stop' : 'Start'}
       </Button>
