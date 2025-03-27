@@ -100,9 +100,10 @@ const theme = createTheme({
 
 // Add Fitbit configuration
 const FITBIT_CONFIG = {
-  clientId: '23Q53D',
-  clientSecret: '069419eb237705422f993a04c5bdccb2',
-  redirectUri: 'http://localhost:3000/callback',
+  clientId: process.env.REACT_APP_FITBIT_CLIENT_ID || '23Q53D',
+  clientSecret: process.env.REACT_APP_FITBIT_CLIENT_SECRET || '069419eb237705422f993a04c5bdccb2',
+  // Use window.location.origin for dynamic host detection
+  redirectUri: process.env.REACT_APP_FITBIT_REDIRECT_URI || `${window.location.origin}/callback`,
   authorizationUri: 'https://www.fitbit.com/oauth2/authorize',
   tokenUri: 'https://api.fitbit.com/oauth2/token',
   scope: 'heartrate profile activity',
@@ -133,22 +134,22 @@ function FitbitAuth() {
 
   const getAccessToken = async (code) => {
     try {
-      const tokenResponse = await fetch(FITBIT_CONFIG.tokenUri, {
+      // Use server API endpoint instead of direct Fitbit API call
+      const tokenResponse = await fetch('/api/fitbit/token', {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'Authorization': 'Basic ' + btoa(`${FITBIT_CONFIG.clientId}:${FITBIT_CONFIG.clientSecret}`)
+          'Content-Type': 'application/json'
         },
-        body: new URLSearchParams({
-          grant_type: 'authorization_code',
+        body: JSON.stringify({
           code: code,
-          redirect_uri: FITBIT_CONFIG.redirectUri,
+          redirectUri: FITBIT_CONFIG.redirectUri,
+          grantType: 'authorization_code'
         })
       });
 
       if (!tokenResponse.ok) {
         const errorData = await tokenResponse.json();
-        throw new Error(errorData.errors?.[0]?.message || 'Failed to get access token');
+        throw new Error(errorData.error || 'Failed to get access token');
       }
 
       const tokenData = await tokenResponse.json();
@@ -168,15 +169,15 @@ function FitbitAuth() {
 
   const refreshAccessToken = async () => {
     try {
-      const tokenResponse = await fetch(FITBIT_CONFIG.tokenUri, {
+      // Use server API endpoint instead of direct Fitbit API call
+      const tokenResponse = await fetch('/api/fitbit/token', {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'Authorization': 'Basic ' + btoa(`${FITBIT_CONFIG.clientId}:${FITBIT_CONFIG.clientSecret}`)
+          'Content-Type': 'application/json'
         },
-        body: new URLSearchParams({
-          grant_type: 'refresh_token',
-          refresh_token: refreshToken
+        body: JSON.stringify({
+          refreshToken: refreshToken,
+          grantType: 'refresh_token'
         })
       });
 
