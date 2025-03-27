@@ -54,6 +54,7 @@ import {
   DialogActions
 } from '@mui/material';
 import { createTheme, ThemeProvider } from '@mui/material/styles';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import MedicalServicesIcon from '@mui/icons-material/MedicalServices';
 import LocalHospitalIcon from '@mui/icons-material/LocalHospital';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
@@ -104,6 +105,16 @@ import {
   PolarRadiusAxis,
   Radar
 } from 'recharts';
+
+// Import Firebase related components
+import { useAuth } from './AuthContext';
+import Login from './components/Login';
+import { patientService, sensorService, deviceService } from './services/firebaseService';
+import { checkAndSeedFirestore } from './seedFirestore';
+
+// Import our components
+import FitbitAuth from './components/FitbitAuth';
+import FitbitHeartRateMonitor from './components/FitbitHeartRateMonitor';
 
 const patients = [
   { 
@@ -297,151 +308,6 @@ const FITBIT_CONFIG = {
   scope: 'heartrate profile activity',
   apiEndpoint: 'https://api.fitbit.com/1/user/-/activities/heart/date/today/1d/1min.json'
 };
-
-// Add authentication helper
-function FitbitAuth() {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [accessToken, setAccessToken] = useState(null);
-  const [refreshToken, setRefreshToken] = useState(null);
-  const [error, setError] = useState(null);
-
-  const login = () => {
-    // Create state parameter for security
-    const state = Math.random().toString(36).substring(7);
-    sessionStorage.setItem('fitbitState', state);
-
-    const authUrl = `${FITBIT_CONFIG.authorizationUri}?` +
-      `response_type=code` +
-      `&client_id=${FITBIT_CONFIG.clientId}` +
-      `&redirect_uri=${encodeURIComponent(FITBIT_CONFIG.redirectUri)}` +
-      `&scope=${encodeURIComponent(FITBIT_CONFIG.scope)}` +
-      `&state=${state}`;
-    
-    window.location.href = authUrl;
-  };
-
-  const getAccessToken = async (code) => {
-    try {
-      // Use server API endpoint instead of direct Fitbit API call
-      const tokenResponse = await fetch('/api/fitbit/token', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          code: code,
-          redirectUri: FITBIT_CONFIG.redirectUri,
-          grantType: 'authorization_code'
-        })
-      });
-
-      if (!tokenResponse.ok) {
-        const errorData = await tokenResponse.json();
-        throw new Error(errorData.error || 'Failed to get access token');
-      }
-
-      const tokenData = await tokenResponse.json();
-      setAccessToken(tokenData.access_token);
-      setRefreshToken(tokenData.refresh_token);
-      setIsAuthenticated(true);
-      
-      // Store tokens securely
-      sessionStorage.setItem('fitbitAccessToken', tokenData.access_token);
-      sessionStorage.setItem('fitbitRefreshToken', tokenData.refresh_token);
-      sessionStorage.setItem('fitbitTokenExpiry', Date.now() + (tokenData.expires_in * 1000));
-    } catch (error) {
-      console.error('Error getting access token:', error);
-      setError(error.message);
-    }
-  };
-
-  const refreshAccessToken = async () => {
-    try {
-      // Use server API endpoint instead of direct Fitbit API call
-      const tokenResponse = await fetch('/api/fitbit/token', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          refreshToken: refreshToken,
-          grantType: 'refresh_token'
-        })
-      });
-
-      if (!tokenResponse.ok) {
-        const errorData = await tokenResponse.json();
-        throw new Error(errorData.errors?.[0]?.message || 'Failed to refresh token');
-      }
-
-      const tokenData = await tokenResponse.json();
-      setAccessToken(tokenData.access_token);
-      setRefreshToken(tokenData.refresh_token);
-      
-      // Update stored tokens
-      sessionStorage.setItem('fitbitAccessToken', tokenData.access_token);
-      sessionStorage.setItem('fitbitRefreshToken', tokenData.refresh_token);
-      sessionStorage.setItem('fitbitTokenExpiry', Date.now() + (tokenData.expires_in * 1000));
-
-      return tokenData.access_token;
-    } catch (error) {
-      console.error('Error refreshing token:', error);
-      setIsAuthenticated(false);
-      // Clear stored tokens on refresh failure
-      sessionStorage.removeItem('fitbitAccessToken');
-      sessionStorage.removeItem('fitbitRefreshToken');
-      sessionStorage.removeItem('fitbitTokenExpiry');
-      throw error;
-    }
-  };
-
-  useEffect(() => {
-    // Check for authorization code in URL
-    const urlParams = new URLSearchParams(window.location.search);
-    const code = urlParams.get('code');
-    const state = urlParams.get('state');
-    const storedState = sessionStorage.getItem('fitbitState');
-    
-    if (code) {
-      // Verify state parameter
-      if (state !== storedState) {
-        console.error('State mismatch - possible CSRF attack');
-        return;
-      }
-      
-      getAccessToken(code);
-      // Clean up URL and state
-      window.history.replaceState({}, document.title, window.location.pathname);
-      sessionStorage.removeItem('fitbitState');
-    } else {
-      // Check for existing tokens
-      const storedAccessToken = sessionStorage.getItem('fitbitAccessToken');
-      const storedRefreshToken = sessionStorage.getItem('fitbitRefreshToken');
-      const tokenExpiry = sessionStorage.getItem('fitbitTokenExpiry');
-
-      if (storedAccessToken && storedRefreshToken) {
-        setAccessToken(storedAccessToken);
-        setRefreshToken(storedRefreshToken);
-        setIsAuthenticated(true);
-
-        // Check if token needs refresh
-        if (tokenExpiry && Date.now() > parseInt(tokenExpiry) - 300000) { // Refresh 5 minutes before expiry
-          refreshAccessToken().catch(() => {
-            // Handle refresh failure - user will need to re-authenticate
-            login();
-          });
-        }
-      }
-    }
-  }, []);
-
-  return { 
-    isAuthenticated, 
-    accessToken, 
-    login,
-    refreshAccessToken 
-  };
-}
 
 function HeartRateMonitor({ patientId }) {
   const [heartRate, setHeartRate] = useState(null);
@@ -1272,10 +1138,10 @@ function SensorDeviceStatus({ device }) {
 }
 
 // Enhanced patient monitoring dashboard
-function EnhancedPatientDashboard() {
+function EnhancedPatientDashboard({ patientsData = patients, loading = false }) {
   const [mode, setMode] = useState('light');
   const [currentTab, setCurrentTab] = useState(0);
-  const [selectedPatient, setSelectedPatient] = useState(patients[0]);
+  const [selectedPatient, setSelectedPatient] = useState(patientsData && patientsData.length > 0 ? patientsData[0] : null);
   const [notifications, setNotifications] = useState([
     { id: 1, message: 'Jane Smith\'s blood pressure is elevated', time: '10 min ago', read: false },
     { id: 2, message: 'Sam Johnson\'s medication schedule updated', time: '25 min ago', read: false },
@@ -1283,6 +1149,16 @@ function EnhancedPatientDashboard() {
   ]);
   const [notificationsAnchor, setNotificationsAnchor] = useState(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  
+  // Get authentication context
+  const { currentUser, logout } = useAuth();
+
+  // Set selected patient when patientsData changes
+  useEffect(() => {
+    if (patientsData && patientsData.length > 0 && !selectedPatient) {
+      setSelectedPatient(patientsData[0]);
+    }
+  }, [patientsData, selectedPatient]);
 
   const toggleColorMode = () => {
     setMode(prevMode => prevMode === 'light' ? 'dark' : 'light');
@@ -1313,6 +1189,39 @@ function EnhancedPatientDashboard() {
   
   const theme = createAppTheme(mode);
   
+  // Handle logout function
+  const handleLogout = async () => {
+    try {
+      await logout();
+      // Redirect happens automatically due to auth state change
+    } catch (error) {
+      console.error("Failed to log out", error);
+    }
+  };
+
+  // Show loading state if data is still loading or selectedPatient is null
+  if (loading || !selectedPatient) {
+    return (
+      <ThemeProvider theme={createAppTheme(mode)}>
+        <CssBaseline />
+        <Box sx={{ 
+          display: 'flex', 
+          justifyContent: 'center', 
+          alignItems: 'center', 
+          minHeight: '100vh' 
+        }}>
+          <CircularProgress size={60} />
+          <Typography variant="h6" sx={{ ml: 2 }}>
+            Loading patient data...
+          </Typography>
+        </Box>
+      </ThemeProvider>
+    );
+  }
+
+  // Get the device list for the selected patient, or default to an empty array if not found
+  const patientDevices = sensorDevices[selectedPatient.id] || [];
+
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
@@ -1509,6 +1418,20 @@ function EnhancedPatientDashboard() {
                 </IconButton>
               </Tooltip>
               
+              <Tooltip title="Log out">
+                <Button
+                  color="inherit"
+                  onClick={handleLogout}
+                  sx={{
+                    ml: 2,
+                    backgroundColor: 'rgba(255,255,255,0.1)',
+                    '&:hover': { backgroundColor: 'rgba(255,255,255,0.2)' }
+                  }}
+                >
+                  Logout
+                </Button>
+              </Tooltip>
+
               <Avatar 
                 sx={{ 
                   ml: 2, 
@@ -1523,7 +1446,7 @@ function EnhancedPatientDashboard() {
                   }
                 }}
               >
-                <PersonIcon />
+                {currentUser && currentUser.email ? currentUser.email.charAt(0).toUpperCase() : <PersonIcon />}
               </Avatar>
             </Box>
           </Toolbar>
@@ -1651,7 +1574,7 @@ function EnhancedPatientDashboard() {
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
                   <Typography variant="h6">Active Patient</Typography>
                   <Box sx={{ display: 'flex' }}>
-                    {patients.map((patient) => (
+                    {patientsData.map((patient) => (
                       <Button
                         key={patient.id}
                         variant={patient.id === selectedPatient.id ? "contained" : "outlined"}
@@ -1760,7 +1683,7 @@ function EnhancedPatientDashboard() {
                           <SensorsIcon sx={{ mr: 0.5, fontSize: 18 }} /> Connected Devices
                         </Typography>
                         <Chip 
-                          label={`${sensorDevices[selectedPatient.id].length} Device${sensorDevices[selectedPatient.id].length !== 1 ? 's' : ''}`}
+                          label={`${patientDevices.length} Device${patientDevices.length !== 1 ? 's' : ''}`}
                           color="primary" 
                           size="small"
                         />
@@ -1773,9 +1696,9 @@ function EnhancedPatientDashboard() {
                         flexGrow: 1,
                         overflow: 'auto'
                       }}>
-                        {sensorDevices[selectedPatient.id].length > 0 ? (
+                        {patientDevices.length > 0 ? (
                           <Stack spacing={1}>
-                            {sensorDevices[selectedPatient.id].map((device) => (
+                            {patientDevices.map((device) => (
                               <Box 
                                 key={device.id}
                                 sx={{ 
@@ -1973,7 +1896,7 @@ function EnhancedPatientDashboard() {
                     <Typography variant="h6" gutterBottom>Health Overview</Typography>
                     <Divider sx={{ mb: 2 }} />
                     
-                    {patients.map((patient, index) => (
+                    {patientsData.map((patient, index) => (
                       <Box 
                         key={patient.id} 
                         sx={{ 
@@ -2627,51 +2550,128 @@ function PatientsPage() {
 
 function App() {
   const [showDemo, setShowDemo] = useState(true);
+  const [patientsData, setPatientsData] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  
+  // Get authentication context
+  const { currentUser } = useAuth();
+  
+  // Seed database on initial load
+  useEffect(() => {
+    const initializeFirestore = async () => {
+      try {
+        await checkAndSeedFirestore();
+      } catch (error) {
+        console.error("Error initializing database:", error);
+      }
+    };
+    
+    initializeFirestore();
+  }, []);
+  
+  // Fetch patients data from Firestore when authenticated
+  useEffect(() => {
+    if (!currentUser) return;
+    
+    const fetchData = async () => {
+      try {
+        setLoading(true);
+        const fetchedPatients = await patientService.getAllPatients();
+        
+        // If no data exists in Firestore yet, use mock data
+        if (fetchedPatients.length === 0) {
+          setPatientsData(patients);
+        } else {
+          setPatientsData(fetchedPatients);
+        }
+        
+        setLoading(false);
+      } catch (err) {
+        console.error("Error fetching patients:", err);
+        setError("Failed to load patient data");
+        setLoading(false);
+        // Fallback to mock data
+        setPatientsData(patients);
+      }
+    };
+
+    fetchData();
+  }, [currentUser]);
+  
+  // Authentication is required
+  if (!currentUser) {
+    return <Login />;
+  }
   
   if (showDemo) {
-    return <EnhancedPatientDashboard />;
+    return <EnhancedPatientDashboard patientsData={patientsData} loading={loading} />;
   }
   
   return (
-    <ThemeProvider theme={createAppTheme('light')}>
-      <Box sx={{ flexGrow: 1, minHeight: '100vh', backgroundColor: 'background.default' }}>
-        <AppBar position="static" elevation={0}>
-          <Toolbar>
-            <IconButton edge="start" color="inherit" aria-label="menu" sx={{ mr: 2 }}>
-              <LocalHospitalIcon />
-            </IconButton>
-            <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
-              CareConnect
-            </Typography>
-            <MedicalServicesIcon />
-          </Toolbar>
-        </AppBar>
+    <Router>
+      <ThemeProvider theme={createAppTheme('light')}>
+        <Routes>
+          <Route path="/fitbit-auth" element={<FitbitAuth />} />
+          <Route path="/callback" element={<FitbitAuth />} />
+          <Route path="/" element={
+            <Box sx={{ flexGrow: 1, minHeight: '100vh', backgroundColor: 'background.default' }}>
+              <AppBar position="static" elevation={0}>
+                <Toolbar>
+                  <IconButton edge="start" color="inherit" aria-label="menu" sx={{ mr: 2 }}>
+                    <LocalHospitalIcon />
+                  </IconButton>
+                  <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
+                    CareConnect
+                  </Typography>
+                  <Button color="inherit" onClick={() => window.location.href = '/fitbit-auth'}>
+                    Connect Fitbit
+                  </Button>
+                  <MedicalServicesIcon />
+                </Toolbar>
+              </AppBar>
 
-        <Container sx={{ mt: 4, mb: 4 }}>
-          <Typography 
-            variant="h4" 
-            component="h1" 
-            gutterBottom 
-            align="center" 
-            sx={{ 
-              mb: 4,
-              fontWeight: 'bold',
-              color: 'primary.main'
-            }}
-          >
-            Patient Dashboard
-          </Typography>
+              <Container sx={{ mt: 4, mb: 4 }}>
+                <Typography 
+                  variant="h4" 
+                  component="h1" 
+                  gutterBottom 
+                  align="center" 
+                  sx={{ 
+                    mb: 4,
+                    fontWeight: 'bold',
+                    color: 'primary.main'
+                  }}
+                >
+                  Patient Dashboard
+                </Typography>
 
-          <Grid container spacing={3}>
-            {patients.map((patient) => (
-              <Grid item xs={12} sm={6} md={4} key={patient.id}>
-                <PatientCard patient={patient} />
-              </Grid>
-            ))}
-          </Grid>
-        </Container>
-      </Box>
-    </ThemeProvider>
+                {/* Add Fitbit Heart Rate Monitor to the main dashboard */}
+                <Box sx={{ mb: 4 }}>
+                  <FitbitHeartRateMonitor />
+                </Box>
+
+                {loading ? (
+                  <Box sx={{ display: 'flex', justifyContent: 'center', my: 4 }}>
+                    <CircularProgress />
+                  </Box>
+                ) : error ? (
+                  <Alert severity="error">{error}</Alert>
+                ) : (
+                  <Grid container spacing={3}>
+                    {patientsData.map((patient) => (
+                      <Grid item xs={12} sm={6} md={4} key={patient.id}>
+                        <PatientCard patient={patient} />
+                      </Grid>
+                    ))}
+                  </Grid>
+                )}
+              </Container>
+            </Box>
+          } />
+        </Routes>
+      </ThemeProvider>
+    </Router>
   );
 }
 
